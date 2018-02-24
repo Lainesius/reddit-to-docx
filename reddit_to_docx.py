@@ -12,6 +12,8 @@ class Comment:
     # levels store indentation info for children comments' indentation
     # siteTable is header post's parent-id - it's -2 so header's would be -1
     levels = {"siteTable": -2}
+    # reduce level_size manually if there're too many levels
+    level_size = docx.shared.Mm(5)
 
     def __init__(self, data, parent=None):
         self.id = data['data-fullname']
@@ -40,22 +42,40 @@ class Comment:
             self.text = '<empty message>'
         try:
             self.level = Comment.levels[self.parent] + 1
+            Comment.levels[self.id] = self.level
         # deleted messages won't be present in levels, deleted() adds it
         except KeyError:
-            deleted(self.parent)
-            self.level = Comment.levels[self.parent] + 1
-        # store level information for further use by message's children
-        Comment.levels[self.id] = self.level
+            # siteTable_deleted is a special case
+            if self.parent == 'deleted':
+                self.parent = 't1_' + data.parent.parent.parent[
+                    'data-permalink'].split('/')[-2]
+            # mark the first child of a deleted post
+            layer = deleted(self.parent)
+            self.level = (Comment.levels[self.parent] + 1, layer)
+            # store level information for further use by message's children
+            Comment.levels[self.id] = self.level[0]
 
-    def convert(self, document):
-        # reduce level_size manually if there're too many levels
-        level_size = docx.shared.Mm(5)
+    # creates a paragraph with set properties, modify if needed
+    def new_paragraph(self, document, level):
         paragraph = document.add_paragraph()
         paragraph.paragraph_format.alignment = \
             docx.enum.text.WD_ALIGN_PARAGRAPH.JUSTIFY_MED
-        # header should appear at the same level as 0th level message
-        paragraph.paragraph_format.left_indent = level_size * self.level if \
-            self.level >= 0 else 0
+        paragraph.paragraph_format.left_indent = Comment.level_size * level
+        return paragraph
+
+    def convert(self, document):
+        # level is str = comment is the first child of a deleted post, so we
+        # add a deleted message one level earlier before we proceed normally
+        if isinstance(self.level, tuple):
+            for a in range(self.level[1], 0, -1):
+                paragraph = self.new_paragraph(document, self.level[0] - a)
+                paragraph.add_run('[DELETED] ').bold = True
+                paragraph.add_run('<deleted message>')
+            paragraph = self.new_paragraph(document, self.level[0])
+        else:
+            # header should appear at the same level as 0th level message
+            paragraph = self.new_paragraph(
+                document, self.level if self.level >= 0 else 0)
         paragraph.add_run(self.author).bold = True
         if isinstance(self.text, list):
             # iterate over all message's paragraphs
@@ -125,14 +145,23 @@ def checker(tag):
 
 
 # resolves issues with deleted comments by finding their level
-def deleted(deleted_id):
+def deleted(deleted_id, layer=1):
     deleted_info = requests.get('https://www.reddit.com/api/info.json?id={}'.
                                 format(deleted_id), headers=agent)
     if deleted_info.status_code != requests.codes.ok:
         print('ERROR: {} while trying to retrieve {}'.format(
             deleted_info.status_code, results.input))
         sys.exit()
-    Comment.levels[deleted_id] = deleted_info.json()['data']['dist']
+    deleted_parent_id = deleted_info.json()[
+        'data']['children'][0]['data']['parent_id']
+    try:
+        Comment.levels[deleted_id] = Comment.levels[deleted_parent_id] + 1 if \
+            Comment.levels[deleted_parent_id] >= 0 else 0
+    except KeyError:
+        layer = deleted(deleted_parent_id, layer=2)
+        Comment.levels[deleted_id] = Comment.levels[deleted_parent_id] + 1 if \
+            Comment.levels[deleted_parent_id] >= 0 else 0
+    return layer
 
 
 # internet solution, as docx does not have pre-built hyperlink method
